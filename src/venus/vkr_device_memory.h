@@ -20,6 +20,13 @@ vkr_device_memory_can_use_external_export(bool dma_buf_supported,
           (opaque_supported && (no_dma_buf_export || !has_gbm_device));
 }
 
+static inline bool
+vkr_device_memory_should_align_opaque_allocation(bool has_export_info,
+                                                 bool no_dma_buf_export)
+{
+   return !has_export_info || !no_dma_buf_export;
+}
+
 struct vkr_device_memory {
    struct vkr_object base;
 

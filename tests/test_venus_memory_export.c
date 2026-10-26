@@ -89,6 +89,13 @@ test_preserve_gbm_dma_buf_path(void)
       return 1;
    }
 
+   if (!vkr_device_memory_should_align_opaque_allocation(false, true) ||
+       !vkr_device_memory_should_align_opaque_allocation(true, false) ||
+       vkr_device_memory_should_align_opaque_allocation(true, true)) {
+      fprintf(stderr, "opaque allocation alignment scope changed\n");
+      return 1;
+   }
+
    puts("PASS preserve-gbm-dma-buf-path");
    return 0;
 }
