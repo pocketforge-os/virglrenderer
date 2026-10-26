@@ -112,8 +112,14 @@ stub_matches=$(grep -c "minigbm_allocation is not enabled" \
    "$prefix.server.log" || true)
 dispatch_matches=$(grep -c "VTEST_CLIENT_ERROR_COMMAND_DISPATCH" \
    "$prefix.server.log" || true)
-cs_error_matches=$(grep -c "vkFreeMemory resulted in CS error" \
+free_cs_error_matches=$(grep -c "vkFreeMemory resulted in CS error" \
    "$prefix.server.log" || true)
+use_cs_error_matches=$(grep -c "vkBindBufferMemory2 resulted in CS error" \
+   "$prefix.server.log" || true)
+device_lost_matches=$(grep -c "async use returned VK_ERROR_DEVICE_LOST" \
+   "$prefix.client.log" || true)
+successful_wait_matches=$(grep -c "async-use reached a successful wait" \
+   "$prefix.client.log" || true)
 case "$case_name" in
    foreign)
       rejection_pattern="failed to import resource: invalid res_id"
@@ -144,7 +150,10 @@ fi
    echo "server_wait_exit=$server_wait_status"
    echo "gbm_stub_matches=$stub_matches"
    echo "dispatch_error_matches=$dispatch_matches"
-   echo "cs_error_matches=$cs_error_matches"
+   echo "free_cs_error_matches=$free_cs_error_matches"
+   echo "use_cs_error_matches=$use_cs_error_matches"
+   echo "device_lost_matches=$device_lost_matches"
+   echo "successful_wait_matches=$successful_wait_matches"
    echo "rejection_matches=$rejection_matches"
 } >"$prefix.summary.log"
 cat "$prefix.summary.log"
@@ -153,7 +162,9 @@ if [ "$VN_ALLOC_MODE" = sync ] || [ "$case_name" = happy ]; then
    if [ "$client_status" -ne 0 ] || [ "$server_status" -ne 0 ]; then
       exit 1
    fi
-elif [ "$client_status" -ne 134 ] || [ "$server_status" -ne 0 ] ||
-     [ "$rejection_matches" -lt 1 ] || [ "$cs_error_matches" -lt 1 ]; then
+elif { [ "$client_status" -ne 134 ] && [ "$device_lost_matches" -lt 1 ]; } ||
+     [ "$server_status" -ne 0 ] || [ "$rejection_matches" -lt 1 ] ||
+     [ "$use_cs_error_matches" -lt 1 ] ||
+     [ "$successful_wait_matches" -ne 0 ]; then
    exit 1
 fi

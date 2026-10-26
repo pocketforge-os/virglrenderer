@@ -19,6 +19,8 @@ struct vk_context {
    VkInstance instance;
    VkPhysicalDevice physical_device;
    VkDevice device;
+   VkQueue queue;
+   uint32_t queue_family_index;
    VkPhysicalDeviceMemoryProperties memory_props;
    PFN_vkGetMemoryFdKHR get_memory_fd;
    PFN_vkGetMemoryFdPropertiesKHR get_memory_fd_properties;
@@ -83,6 +85,8 @@ create_context(struct vk_context *ctx)
                            &ctx->device);
    if (result != VK_SUCCESS)
       goto fail;
+   ctx->queue_family_index = queue_info.queueFamilyIndex;
+   vkGetDeviceQueue(ctx->device, ctx->queue_family_index, 0, &ctx->queue);
 
    vkGetPhysicalDeviceMemoryProperties(ctx->physical_device,
                                        &ctx->memory_props);
@@ -112,6 +116,23 @@ choose_memory_type(const struct vk_context *ctx)
          return i;
    }
    return 0;
+}
+
+static bool
+find_memory_type(const struct vk_context *ctx,
+                 uint32_t type_bits,
+                 VkMemoryPropertyFlags properties,
+                 uint32_t *memory_type)
+{
+   for (uint32_t i = 0; i < ctx->memory_props.memoryTypeCount; i++) {
+      if ((type_bits & (1u << i)) &&
+          (ctx->memory_props.memoryTypes[i].propertyFlags & properties) ==
+             properties) {
+         *memory_type = i;
+         return true;
+      }
+   }
+   return false;
 }
 
 static VkResult
@@ -188,6 +209,164 @@ expect_invalid(const char *name, VkResult result, bool async_alloc)
    return 0;
 }
 
+/*
+ * An asynchronous vkAllocateMemory can return before the renderer rejects the
+ * import.  Make the next host-visible operation use the rejected memory, then
+ * require the context to fail before a copy can complete.
+ */
+static int
+use_rejected_memory(struct vk_context *ctx,
+                    const char *name,
+                    VkDeviceMemory imported)
+{
+   const VkDeviceSize size = 64;
+   const uint8_t sentinel = 0xa5;
+   const VkExternalMemoryBufferCreateInfo external_info = {
+      .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT,
+   };
+   const VkBufferCreateInfo source_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .pNext = &external_info,
+      .size = size,
+      .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+   };
+   const VkBufferCreateInfo readback_info = {
+      .sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
+      .size = size,
+      .usage = VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+      .sharingMode = VK_SHARING_MODE_EXCLUSIVE,
+   };
+   VkBuffer source = VK_NULL_HANDLE;
+   VkBuffer readback = VK_NULL_HANDLE;
+   VkDeviceMemory readback_memory = VK_NULL_HANDLE;
+   VkCommandPool command_pool = VK_NULL_HANDLE;
+   VkResult result = vkCreateBuffer(ctx->device, &source_info, NULL, &source);
+   if (result != VK_SUCCESS)
+      goto setup_fail;
+   result = vkCreateBuffer(ctx->device, &readback_info, NULL, &readback);
+   if (result != VK_SUCCESS)
+      goto setup_fail;
+
+   VkMemoryRequirements requirements;
+   vkGetBufferMemoryRequirements(ctx->device, readback, &requirements);
+   uint32_t readback_type;
+   if (!find_memory_type(ctx, requirements.memoryTypeBits,
+                         VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT |
+                            VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
+                         &readback_type)) {
+      fprintf(stderr, "FAIL %s async-use setup: no coherent readback type\n",
+              name);
+      goto fail;
+   }
+   const VkMemoryAllocateInfo allocation_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
+      .allocationSize = requirements.size,
+      .memoryTypeIndex = readback_type,
+   };
+   result = vkAllocateMemory(ctx->device, &allocation_info, NULL,
+                             &readback_memory);
+   if (result != VK_SUCCESS)
+      goto setup_fail;
+   result = vkBindBufferMemory(ctx->device, readback, readback_memory, 0);
+   if (result != VK_SUCCESS)
+      goto setup_fail;
+
+   void *mapping = NULL;
+   result = vkMapMemory(ctx->device, readback_memory, 0, size, 0, &mapping);
+   if (result != VK_SUCCESS)
+      goto setup_fail;
+   memset(mapping, sentinel, size);
+   vkUnmapMemory(ctx->device, readback_memory);
+
+   const VkCommandPoolCreateInfo pool_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO,
+      .queueFamilyIndex = ctx->queue_family_index,
+   };
+   result = vkCreateCommandPool(ctx->device, &pool_info, NULL, &command_pool);
+   if (result != VK_SUCCESS)
+      goto setup_fail;
+   const VkCommandBufferAllocateInfo command_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO,
+      .commandPool = command_pool,
+      .level = VK_COMMAND_BUFFER_LEVEL_PRIMARY,
+      .commandBufferCount = 1,
+   };
+   VkCommandBuffer command_buffer = VK_NULL_HANDLE;
+   result = vkAllocateCommandBuffers(ctx->device, &command_info,
+                                     &command_buffer);
+   if (result != VK_SUCCESS)
+      goto setup_fail;
+
+   printf("PASS %s: attempting async use of rejected import\n", name);
+   fflush(stdout);
+   result = vkBindBufferMemory(ctx->device, source, imported, 0);
+   if (result != VK_SUCCESS)
+      goto use_failed;
+
+   const VkCommandBufferBeginInfo begin_info = {
+      .sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO,
+      .flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT,
+   };
+   result = vkBeginCommandBuffer(command_buffer, &begin_info);
+   if (result != VK_SUCCESS)
+      goto use_failed;
+   const VkBufferCopy copy = { .size = size };
+   vkCmdCopyBuffer(command_buffer, source, readback, 1, &copy);
+   result = vkEndCommandBuffer(command_buffer);
+   if (result != VK_SUCCESS)
+      goto use_failed;
+   const VkSubmitInfo submit_info = {
+      .sType = VK_STRUCTURE_TYPE_SUBMIT_INFO,
+      .commandBufferCount = 1,
+      .pCommandBuffers = &command_buffer,
+   };
+   result = vkQueueSubmit(ctx->queue, 1, &submit_info, VK_NULL_HANDLE);
+   if (result != VK_SUCCESS)
+      goto use_failed;
+   result = vkQueueWaitIdle(ctx->queue);
+   if (result != VK_SUCCESS)
+      goto use_failed;
+
+   result = vkMapMemory(ctx->device, readback_memory, 0, size, 0, &mapping);
+   bool unchanged = result == VK_SUCCESS;
+   if (result == VK_SUCCESS) {
+      const uint8_t *bytes = mapping;
+      for (VkDeviceSize i = 0; i < size; i++)
+         unchanged &= bytes[i] == sentinel;
+      vkUnmapMemory(ctx->device, readback_memory);
+   }
+   fprintf(stderr,
+           "FAIL %s async-use reached a successful wait; "
+           "sentinel_unchanged=%d\n",
+           name, unchanged);
+   return 1;
+
+use_failed:
+   if (result == VK_ERROR_DEVICE_LOST) {
+      printf("PASS %s: async use returned VK_ERROR_DEVICE_LOST\n", name);
+      fflush(stdout);
+      return 0;
+   }
+   fprintf(stderr, "FAIL %s async-use: unexpected result %d\n", name,
+           result);
+   return 1;
+
+setup_fail:
+   fprintf(stderr, "FAIL %s async-use setup: %d\n", name, result);
+fail:
+   if (command_pool)
+      vkDestroyCommandPool(ctx->device, command_pool, NULL);
+   if (readback_memory)
+      vkFreeMemory(ctx->device, readback_memory, NULL);
+   if (readback)
+      vkDestroyBuffer(ctx->device, readback, NULL);
+   if (source)
+      vkDestroyBuffer(ctx->device, source, NULL);
+   return 1;
+}
+
 static int
 run_case(const char *name)
 {
@@ -256,8 +435,11 @@ run_case(const char *name)
       result = import_memory(&owner, import_fd, size * 2,
                              memory_type, &imported);
       ret = expect_invalid(name, result, async_alloc);
-      if (result == VK_SUCCESS)
+      if (result == VK_SUCCESS) {
+         if (async_alloc)
+            return use_rejected_memory(&owner, name, imported);
          vkFreeMemory(owner.device, imported, NULL);
+      }
       else if (import_fd >= 0)
          close(import_fd);
    } else if (!strcmp(name, "wrong-offset")) {
@@ -271,8 +453,11 @@ run_case(const char *name)
       VkDeviceMemory imported = VK_NULL_HANDLE;
       result = import_memory(&owner, import_fd, size, memory_type, &imported);
       ret = expect_invalid(name, result, async_alloc);
-      if (result == VK_SUCCESS)
+      if (result == VK_SUCCESS) {
+         if (async_alloc)
+            return use_rejected_memory(&owner, name, imported);
          vkFreeMemory(owner.device, imported, NULL);
+      }
       else
          close(import_fd);
    } else if (!strcmp(name, "wrong-memory-type")) {
@@ -281,8 +466,11 @@ run_case(const char *name)
       result = import_memory(&owner, import_fd, size,
                              memory_type + 1, &imported);
       ret = expect_invalid(name, result, async_alloc);
-      if (result == VK_SUCCESS)
+      if (result == VK_SUCCESS) {
+         if (async_alloc)
+            return use_rejected_memory(&owner, name, imported);
          vkFreeMemory(owner.device, imported, NULL);
+      }
       else if (import_fd >= 0)
          close(import_fd);
    } else if (!strcmp(name, "foreign")) {
@@ -297,8 +485,11 @@ run_case(const char *name)
       result = import_memory(&foreign, import_fd, size,
                              choose_memory_type(&foreign), &imported);
       ret = expect_invalid(name, result, async_alloc);
-      if (result == VK_SUCCESS)
+      if (result == VK_SUCCESS) {
+         if (async_alloc)
+            return use_rejected_memory(&foreign, name, imported);
          vkFreeMemory(foreign.device, imported, NULL);
+      }
       else if (import_fd >= 0)
          close(import_fd);
       destroy_context(&foreign);
