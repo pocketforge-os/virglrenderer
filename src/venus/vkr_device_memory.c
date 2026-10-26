@@ -12,13 +12,15 @@
 
 static bool
 vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
+                                   const struct vkr_device *dev,
+                                   uint64_t allocation_size,
+                                   uint32_t memory_type_index,
                                    const VkImportMemoryResourceInfoMESA *res_info,
                                    VkImportMemoryFdInfoKHR *out)
 {
    struct vkr_resource *res = vkr_context_get_resource(ctx, res_info->resourceId);
    if (!res) {
       vkr_log("failed to import resource: invalid res_id %u", res_info->resourceId);
-      vkr_context_set_fatal(ctx);
       return false;
    }
 
@@ -28,6 +30,10 @@ vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
       handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
       break;
    case VIRGL_RESOURCE_FD_OPAQUE:
+      if (vkr_device_memory_validate_opaque_resource(
+             res, ctx->ctx_id, dev->base.id, allocation_size,
+             memory_type_index) != VK_SUCCESS)
+         return false;
       handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
       break;
    default:
@@ -45,6 +51,60 @@ vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
       .handleType = handle_type,
    };
    return true;
+}
+
+static VkResult
+vkr_device_memory_get_opaque_export(
+   const struct vkr_resource *res,
+   uint32_t context_id,
+   vkr_object_id device_id,
+   const struct vkr_opaque_export_info **out_export)
+{
+   if (res->fd_type != VIRGL_RESOURCE_FD_OPAQUE || !res->opaque_export.valid) {
+      vkr_log("opaque resource was not exported by this renderer");
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
+   if (res->opaque_export.context_id != context_id ||
+       res->opaque_export.device_id != device_id) {
+      vkr_log("opaque resource owner does not match importing context and device");
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
+   if (res->opaque_export.fd_offset >= 0 &&
+       lseek(res->u.fd, 0, SEEK_CUR) != res->opaque_export.fd_offset) {
+      vkr_log("opaque resource fd offset changed after export");
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
+   *out_export = &res->opaque_export;
+   return VK_SUCCESS;
+}
+
+VkResult
+vkr_device_memory_validate_opaque_resource(const struct vkr_resource *res,
+                                           uint32_t context_id,
+                                           vkr_object_id device_id,
+                                           uint64_t allocation_size,
+                                           uint32_t memory_type_index)
+{
+   const struct vkr_opaque_export_info *export_info;
+   VkResult result = vkr_device_memory_get_opaque_export(
+      res, context_id, device_id, &export_info);
+   if (result != VK_SUCCESS)
+      return result;
+
+   if (export_info->allocation_size != allocation_size) {
+      vkr_log("opaque resource allocation size does not match export");
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
+   if (export_info->memory_type_index != memory_type_index) {
+      vkr_log("opaque resource memory type does not match export");
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
+   return VK_SUCCESS;
 }
 
 #if defined(HAVE_LINUX_UDMABUF_H) && defined(HAVE_MEMFD_CREATE)
@@ -238,19 +298,39 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
 
    VkMemoryAllocateInfo *alloc_info = (VkMemoryAllocateInfo *)args->pAllocateInfo;
    const uint32_t mem_type_index = alloc_info->memoryTypeIndex;
+   VkImportMemoryResourceInfoMESA *res_info = NULL;
+   VkBaseInStructure *prev_of_res_info = vkr_find_prev_struct(
+      alloc_info, VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA);
    if (unlikely(mem_type_index >= physical_dev->memory_properties.memoryTypeCount)) {
+      if (prev_of_res_info) {
+         res_info = (VkImportMemoryResourceInfoMESA *)prev_of_res_info->pNext;
+         struct vkr_resource *res =
+            vkr_context_get_resource(ctx, res_info->resourceId);
+         if (!res) {
+            vkr_log("failed to import resource: invalid res_id %u",
+                    res_info->resourceId);
+            args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+            return;
+         }
+         if (res->fd_type == VIRGL_RESOURCE_FD_OPAQUE) {
+            vkr_device_memory_validate_opaque_resource(
+               res, ctx->ctx_id, dev->base.id, alloc_info->allocationSize,
+               mem_type_index);
+            args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+            return;
+         }
+      }
       args->ret = VK_ERROR_UNKNOWN;
       return;
    }
 
    /* translate VkImportMemoryResourceInfoMESA into VkImportMemoryFdInfoKHR in place */
    VkImportMemoryFdInfoKHR local_import_info = { .fd = -1 };
-   VkImportMemoryResourceInfoMESA *res_info = NULL;
-   VkBaseInStructure *prev_of_res_info = vkr_find_prev_struct(
-      alloc_info, VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA);
    if (prev_of_res_info) {
       res_info = (VkImportMemoryResourceInfoMESA *)prev_of_res_info->pNext;
-      if (!vkr_get_fd_info_from_resource_info(ctx, res_info, &local_import_info)) {
+      if (!vkr_get_fd_info_from_resource_info(ctx, dev, alloc_info->allocationSize,
+                                              mem_type_index, res_info,
+                                              &local_import_info)) {
          args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
          return;
       }
@@ -441,7 +521,25 @@ vkr_dispatch_vkGetMemoryResourcePropertiesMESA(
    struct vkr_resource *res = vkr_context_get_resource(ctx, args->resourceId);
    if (!res) {
       vkr_log("failed to query resource props: invalid res_id %u", args->resourceId);
-      vkr_context_set_fatal(ctx);
+      args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      return;
+   }
+
+   VkMemoryResourceAllocationSizePropertiesMESA *alloc_size_props =
+      vkr_find_struct(args->pMemoryResourceProperties->pNext,
+                      VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA);
+
+   if (res->fd_type == VIRGL_RESOURCE_FD_OPAQUE) {
+      const struct vkr_opaque_export_info *export_info;
+      args->ret = vkr_device_memory_get_opaque_export(
+         res, ctx->ctx_id, dev->base.id, &export_info);
+      if (args->ret != VK_SUCCESS)
+         return;
+
+      args->pMemoryResourceProperties->memoryTypeBits =
+         1u << export_info->memory_type_index;
+      if (alloc_size_props)
+         alloc_size_props->allocationSize = export_info->allocation_size;
       return;
    }
 
@@ -465,9 +563,6 @@ vkr_dispatch_vkGetMemoryResourcePropertiesMESA(
 
    args->pMemoryResourceProperties->memoryTypeBits = mem_fd_props.memoryTypeBits;
 
-   VkMemoryResourceAllocationSizePropertiesMESA *alloc_size_props =
-      vkr_find_struct(args->pMemoryResourceProperties->pNext,
-                      VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA);
    if (alloc_size_props)
       alloc_size_props->allocationSize = res->size;
 }

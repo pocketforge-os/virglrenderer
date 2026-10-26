@@ -88,6 +88,8 @@ if with_venus
         args : ['hide-opaque-get-info'])
    test('venus-memory-preserve-dma-buf-get-info', test_venus_memory_export,
         args : ['preserve-dma-buf-get-info'])
+   test('venus-memory-opaque-import-validation', test_venus_memory_export,
+        args : ['opaque-import-validation'])
 endif
 
 # For some unknown reason running this test in paralel with the others

@@ -6,6 +6,8 @@
 #ifndef VKR_CONTEXT_H
 #define VKR_CONTEXT_H
 
+#include <sys/types.h>
+
 #include "vkr_common.h"
 #include "vkr_library.h"
 
@@ -19,6 +21,15 @@
  * When vkr_context_create_resource or vkr_context_import_resource is called, a
  * vkr_resource is created, and is valid until vkr_context_destroy_resource.
  */
+struct vkr_opaque_export_info {
+   bool valid;
+   uint32_t context_id;
+   vkr_object_id device_id;
+   uint64_t allocation_size;
+   uint32_t memory_type_index;
+   off_t fd_offset;
+};
+
 struct vkr_resource {
    uint32_t res_id;
 
@@ -32,6 +43,9 @@ struct vkr_resource {
    } u;
 
    size_t size;
+
+   /* Valid only for OPAQUE resources exported by this renderer. */
+   struct vkr_opaque_export_info opaque_export;
 };
 
 enum vkr_context_validate_level {

@@ -165,13 +165,58 @@ test_get_info_fd_visibility(bool opaque)
    return 0;
 }
 
+static int
+test_opaque_import_validation(void)
+{
+   struct vkr_resource resource = {
+      .fd_type = VIRGL_RESOURCE_FD_OPAQUE,
+      .u.fd = backing_fd,
+      .opaque_export = {
+         .valid = true,
+         .context_id = 1,
+         .device_id = 2,
+         .allocation_size = 4096,
+         .memory_type_index = 3,
+         .fd_offset = 0,
+      },
+   };
+
+   if (lseek(backing_fd, 0, SEEK_SET) != 0)
+      return 2;
+
+   if (vkr_device_memory_validate_opaque_resource(&resource, 1, 2, 4096, 3) !=
+          VK_SUCCESS ||
+       vkr_device_memory_validate_opaque_resource(&resource, 9, 2, 4096, 3) !=
+          VK_ERROR_INVALID_EXTERNAL_HANDLE ||
+       vkr_device_memory_validate_opaque_resource(&resource, 1, 9, 4096, 3) !=
+          VK_ERROR_INVALID_EXTERNAL_HANDLE ||
+       vkr_device_memory_validate_opaque_resource(&resource, 1, 2, 8192, 3) !=
+          VK_ERROR_INVALID_EXTERNAL_HANDLE ||
+       vkr_device_memory_validate_opaque_resource(&resource, 1, 2, 4096, 4) !=
+          VK_ERROR_INVALID_EXTERNAL_HANDLE) {
+      fprintf(stderr, "opaque resource metadata validation mismatch\n");
+      return 1;
+   }
+
+   if (lseek(backing_fd, 1, SEEK_SET) != 1 ||
+       vkr_device_memory_validate_opaque_resource(&resource, 1, 2, 4096, 3) !=
+          VK_ERROR_INVALID_EXTERNAL_HANDLE) {
+      fprintf(stderr, "opaque resource offset validation mismatch\n");
+      return 1;
+   }
+
+   puts("PASS opaque-import-validation");
+   return 0;
+}
+
 int
 main(int argc, char **argv)
 {
    if (argc != 2) {
       fprintf(stderr,
               "usage: %s never-replace-dma-buf|preserve-gbm-dma-buf-path|"
-              "hide-opaque-get-info|preserve-dma-buf-get-info\n",
+              "hide-opaque-get-info|preserve-dma-buf-get-info|"
+              "opaque-import-validation\n",
               argv[0]);
       return 2;
    }
@@ -192,6 +237,8 @@ main(int argc, char **argv)
       ret = test_get_info_fd_visibility(true);
    else if (!strcmp(argv[1], "preserve-dma-buf-get-info"))
       ret = test_get_info_fd_visibility(false);
+   else if (!strcmp(argv[1], "opaque-import-validation"))
+      ret = test_opaque_import_validation();
    else
       ret = 2;
 

@@ -9,6 +9,7 @@
 #include "vkr_common.h"
 
 struct gbm_bo;
+struct vkr_resource;
 
 static inline bool
 vkr_device_memory_can_use_external_export(bool dma_buf_supported,
@@ -61,5 +62,12 @@ vkr_device_memory_export_blob(struct vkr_device_memory *mem,
                               uint64_t blob_size,
                               uint32_t blob_flags,
                               struct virgl_context_blob *out_blob);
+
+VkResult
+vkr_device_memory_validate_opaque_resource(const struct vkr_resource *res,
+                                           uint32_t context_id,
+                                           vkr_object_id device_id,
+                                           uint64_t allocation_size,
+                                           uint32_t memory_type_index);
 
 #endif /* VKR_DEVICE_MEMORY_H */
