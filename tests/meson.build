@@ -84,6 +84,8 @@ if with_venus
         args : ['never-replace-dma-buf'])
    test('venus-memory-preserve-gbm-dma-buf-path', test_venus_memory_export,
         args : ['preserve-gbm-dma-buf-path'])
+   test('venus-memory-track-implicit-opaque-only', test_venus_memory_export,
+        args : ['track-implicit-opaque-only'])
    test('venus-memory-hide-opaque-get-info', test_venus_memory_export,
         args : ['hide-opaque-get-info'])
    test('venus-memory-preserve-dma-buf-get-info', test_venus_memory_export,

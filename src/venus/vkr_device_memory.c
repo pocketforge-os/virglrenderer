@@ -342,7 +342,7 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
       vkr_find_struct(alloc_info->pNext, VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO);
 
    /* track if driver has requested export allocation */
-   const bool might_export = export_info && export_info->handleTypes;
+   bool might_export = export_info && export_info->handleTypes;
 
    /* XXX Force dma_buf/opaque fd export or gbm bo import until a new extension that
     * supports direct export from host visible memory
@@ -394,6 +394,8 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
             };
             export_info = &local_export_info;
             alloc_info->pNext = &local_export_info;
+            might_export =
+               vkr_device_memory_should_track_implicit_export(handle_type);
          }
 
          if (handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT &&

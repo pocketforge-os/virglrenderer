@@ -28,6 +28,13 @@ vkr_device_memory_should_align_opaque_allocation(bool has_export_info,
    return !has_export_info || !no_dma_buf_export;
 }
 
+static inline bool
+vkr_device_memory_should_track_implicit_export(
+   UNUSED VkExternalMemoryHandleTypeFlagBits handle_type)
+{
+   return false;
+}
+
 struct vkr_device_memory {
    struct vkr_object base;
 

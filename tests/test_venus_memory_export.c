@@ -102,6 +102,21 @@ test_preserve_gbm_dma_buf_path(void)
 }
 
 static int
+test_track_implicit_opaque_only(void)
+{
+   if (vkr_device_memory_should_track_implicit_export(
+          VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) ||
+       !vkr_device_memory_should_track_implicit_export(
+          VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT)) {
+      fprintf(stderr, "implicit export tracking scope mismatch\n");
+      return 1;
+   }
+
+   puts("PASS track-implicit-opaque-only");
+   return 0;
+}
+
+static int
 test_get_info_fd_visibility(bool opaque)
 {
    int pipe_fds[2];
@@ -215,6 +230,7 @@ main(int argc, char **argv)
    if (argc != 2) {
       fprintf(stderr,
               "usage: %s never-replace-dma-buf|preserve-gbm-dma-buf-path|"
+              "track-implicit-opaque-only|"
               "hide-opaque-get-info|preserve-dma-buf-get-info|"
               "opaque-import-validation\n",
               argv[0]);
@@ -233,6 +249,8 @@ main(int argc, char **argv)
       ret = test_never_replace_dma_buf();
    else if (!strcmp(argv[1], "preserve-gbm-dma-buf-path"))
       ret = test_preserve_gbm_dma_buf_path();
+   else if (!strcmp(argv[1], "track-implicit-opaque-only"))
+      ret = test_track_implicit_opaque_only();
    else if (!strcmp(argv[1], "hide-opaque-get-info"))
       ret = test_get_info_fd_visibility(true);
    else if (!strcmp(argv[1], "preserve-dma-buf-get-info"))
