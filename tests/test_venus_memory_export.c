@@ -13,6 +13,7 @@
 #include "venus/vkr_device.h"
 #include "venus/vkr_device_memory.h"
 #include "venus/vkr_physical_device.h"
+#include "virglrenderer.h"
 
 static int backing_fd = -1;
 static VkExternalMemoryHandleTypeFlagBits exported_handle_type;
@@ -100,12 +101,77 @@ test_preserve_gbm_dma_buf_path(void)
    return 0;
 }
 
+static int
+test_get_info_fd_visibility(bool opaque)
+{
+   int pipe_fds[2];
+   if (pipe(pipe_fds)) {
+      perror("create pipe");
+      return 2;
+   }
+
+   struct virgl_renderer_callbacks callbacks = {
+      .version = 1,
+   };
+   uint32_t cookie = 0;
+   if (virgl_renderer_init(&cookie, VIRGL_RENDERER_NO_VIRGL, &callbacks)) {
+      fprintf(stderr, "failed to initialize renderer\n");
+      close(pipe_fds[0]);
+      close(pipe_fds[1]);
+      return 2;
+   }
+
+   const uint32_t fd_type = opaque ? VIRGL_RENDERER_BLOB_FD_TYPE_OPAQUE
+                                   : VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF;
+   const struct virgl_renderer_resource_import_blob_args import_args = {
+      .res_handle = 1,
+      .blob_mem = VIRGL_RENDERER_BLOB_MEM_HOST3D,
+      .fd_type = fd_type,
+      .fd = pipe_fds[0],
+      .size = 4096,
+   };
+   if (virgl_renderer_resource_import_blob(&import_args)) {
+      fprintf(stderr, "failed to create fd-backed resource\n");
+      close(pipe_fds[0]);
+      close(pipe_fds[1]);
+      virgl_renderer_cleanup(&cookie);
+      return 2;
+   }
+
+   struct virgl_renderer_resource_info info = { 0 };
+   struct virgl_renderer_resource_info_ext info_ext = {
+      .version = VIRGL_RENDERER_RESOURCE_INFO_EXT_VERSION,
+   };
+   const int expected_fd = opaque ? -1 : pipe_fds[0];
+   const int info_ret = virgl_renderer_resource_get_info(1, &info);
+   const int info_ext_ret = virgl_renderer_resource_get_info_ext(1, &info_ext);
+   const bool passed = !info_ret && !info_ext_ret && info.fd == expected_fd &&
+                       info_ext.base.fd == expected_fd;
+
+   close(pipe_fds[1]);
+   virgl_renderer_resource_unref(1);
+   virgl_renderer_cleanup(&cookie);
+
+   if (!passed) {
+      fprintf(stderr,
+              "get_info fd visibility mismatch: type=%d expected=%d info=%d "
+              "info_ext=%d info_ret=%d info_ext_ret=%d\n",
+              fd_type, expected_fd, info.fd, info_ext.base.fd, info_ret,
+              info_ext_ret);
+      return 1;
+   }
+
+   printf("PASS %s-get-info-fd\n", opaque ? "hide-opaque" : "preserve-dma-buf");
+   return 0;
+}
+
 int
 main(int argc, char **argv)
 {
    if (argc != 2) {
       fprintf(stderr,
-              "usage: %s never-replace-dma-buf|preserve-gbm-dma-buf-path\n",
+              "usage: %s never-replace-dma-buf|preserve-gbm-dma-buf-path|"
+              "hide-opaque-get-info|preserve-dma-buf-get-info\n",
               argv[0]);
       return 2;
    }
@@ -122,6 +188,10 @@ main(int argc, char **argv)
       ret = test_never_replace_dma_buf();
    else if (!strcmp(argv[1], "preserve-gbm-dma-buf-path"))
       ret = test_preserve_gbm_dma_buf_path();
+   else if (!strcmp(argv[1], "hide-opaque-get-info"))
+      ret = test_get_info_fd_visibility(true);
+   else if (!strcmp(argv[1], "preserve-dma-buf-get-info"))
+      ret = test_get_info_fd_visibility(false);
    else
       ret = 2;
 

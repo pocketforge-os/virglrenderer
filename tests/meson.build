@@ -79,11 +79,15 @@ if with_venus
       'test_venus_memory_export',
       'test_venus_memory_export.c',
       include_directories : include_directories('../src/mesa', '../src/mesa/compat'),
-      dependencies : [libvirgl_dep, venus_dep])
+      dependencies : [libvirglrenderer_dep, venus_dep])
    test('venus-memory-never-replace-dma-buf', test_venus_memory_export,
         args : ['never-replace-dma-buf'])
    test('venus-memory-preserve-gbm-dma-buf-path', test_venus_memory_export,
         args : ['preserve-gbm-dma-buf-path'])
+   test('venus-memory-hide-opaque-get-info', test_venus_memory_export,
+        args : ['hide-opaque-get-info'])
+   test('venus-memory-preserve-dma-buf-get-info', test_venus_memory_export,
+        args : ['preserve-dma-buf-get-info'])
 endif
 
 # For some unknown reason running this test in paralel with the others
