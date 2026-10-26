@@ -12,13 +12,15 @@
 
 static bool
 vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
+                                   const struct vkr_device *dev,
+                                   uint64_t *allocation_size,
+                                   uint32_t memory_type_index,
                                    const VkImportMemoryResourceInfoMESA *res_info,
                                    VkImportMemoryFdInfoKHR *out)
 {
    struct vkr_resource *res = vkr_context_get_resource(ctx, res_info->resourceId);
    if (!res) {
       vkr_log("failed to import resource: invalid res_id %u", res_info->resourceId);
-      vkr_context_set_fatal(ctx);
       return false;
    }
 
@@ -28,6 +30,10 @@ vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
       handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
       break;
    case VIRGL_RESOURCE_FD_OPAQUE:
+      if (vkr_device_memory_validate_opaque_resource(
+             res, ctx->ctx_id, dev->base.id, *allocation_size,
+             memory_type_index, allocation_size) != VK_SUCCESS)
+         return false;
       handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
       break;
    default:
@@ -45,6 +51,64 @@ vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
       .handleType = handle_type,
    };
    return true;
+}
+
+static VkResult
+vkr_device_memory_get_opaque_export(
+   const struct vkr_resource *res,
+   uint32_t context_id,
+   vkr_object_id device_id,
+   const struct vkr_opaque_export_info **out_export)
+{
+   if (res->fd_type != VIRGL_RESOURCE_FD_OPAQUE || !res->opaque_export.valid) {
+      vkr_log("opaque resource was not exported by this renderer");
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
+   if (res->opaque_export.context_id != context_id ||
+       res->opaque_export.device_id != device_id) {
+      vkr_log("opaque resource owner does not match importing context and device");
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
+   if (res->opaque_export.fd_offset >= 0 &&
+       lseek(res->u.fd, 0, SEEK_CUR) != res->opaque_export.fd_offset) {
+      vkr_log("opaque resource fd offset changed after export");
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
+   *out_export = &res->opaque_export;
+   return VK_SUCCESS;
+}
+
+VkResult
+vkr_device_memory_validate_opaque_resource(const struct vkr_resource *res,
+                                           uint32_t context_id,
+                                           vkr_object_id device_id,
+                                           uint64_t allocation_size,
+                                           uint32_t memory_type_index,
+                                           uint64_t *out_driver_allocation_size)
+{
+   const struct vkr_opaque_export_info *export_info;
+   VkResult result = vkr_device_memory_get_opaque_export(
+      res, context_id, device_id, &export_info);
+   if (result != VK_SUCCESS)
+      return result;
+
+   if (export_info->guest_visible_allocation_size != allocation_size) {
+      vkr_log("opaque resource allocation size does not match export");
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
+   if (export_info->memory_type_index != memory_type_index) {
+      vkr_log("opaque resource memory type does not match export");
+      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
+   }
+
+   if (out_driver_allocation_size)
+      *out_driver_allocation_size = export_info->driver_allocation_size;
+
+   return VK_SUCCESS;
 }
 
 #if defined(HAVE_LINUX_UDMABUF_H) && defined(HAVE_MEMFD_CREATE)
@@ -237,20 +301,41 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
    struct vkr_physical_device *physical_dev = dev->physical_device;
 
    VkMemoryAllocateInfo *alloc_info = (VkMemoryAllocateInfo *)args->pAllocateInfo;
+   const uint64_t guest_visible_allocation_size = alloc_info->allocationSize;
    const uint32_t mem_type_index = alloc_info->memoryTypeIndex;
+   VkImportMemoryResourceInfoMESA *res_info = NULL;
+   VkBaseInStructure *prev_of_res_info = vkr_find_prev_struct(
+      alloc_info, VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA);
    if (unlikely(mem_type_index >= physical_dev->memory_properties.memoryTypeCount)) {
+      if (prev_of_res_info) {
+         res_info = (VkImportMemoryResourceInfoMESA *)prev_of_res_info->pNext;
+         struct vkr_resource *res =
+            vkr_context_get_resource(ctx, res_info->resourceId);
+         if (!res) {
+            vkr_log("failed to import resource: invalid res_id %u",
+                    res_info->resourceId);
+            args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+            return;
+         }
+         if (res->fd_type == VIRGL_RESOURCE_FD_OPAQUE) {
+            vkr_device_memory_validate_opaque_resource(
+               res, ctx->ctx_id, dev->base.id, alloc_info->allocationSize,
+               mem_type_index, NULL);
+            args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+            return;
+         }
+      }
       args->ret = VK_ERROR_UNKNOWN;
       return;
    }
 
    /* translate VkImportMemoryResourceInfoMESA into VkImportMemoryFdInfoKHR in place */
    VkImportMemoryFdInfoKHR local_import_info = { .fd = -1 };
-   VkImportMemoryResourceInfoMESA *res_info = NULL;
-   VkBaseInStructure *prev_of_res_info = vkr_find_prev_struct(
-      alloc_info, VK_STRUCTURE_TYPE_IMPORT_MEMORY_RESOURCE_INFO_MESA);
    if (prev_of_res_info) {
       res_info = (VkImportMemoryResourceInfoMESA *)prev_of_res_info->pNext;
-      if (!vkr_get_fd_info_from_resource_info(ctx, res_info, &local_import_info)) {
+      if (!vkr_get_fd_info_from_resource_info(ctx, dev, &alloc_info->allocationSize,
+                                              mem_type_index, res_info,
+                                              &local_import_info)) {
          args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
          return;
       }
@@ -262,7 +347,7 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
       vkr_find_struct(alloc_info->pNext, VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO);
 
    /* track if driver has requested export allocation */
-   const bool might_export = export_info && export_info->handleTypes;
+   bool might_export = export_info && export_info->handleTypes;
 
    /* XXX Force dma_buf/opaque fd export or gbm bo import until a new extension that
     * supports direct export from host visible memory
@@ -292,13 +377,19 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
          !(export_info->handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
       const bool force_udmabuf_import = physical_dev->udmabuf_dev_fd >= 0;
       if (!force_udmabuf_import &&
-          (physical_dev->is_dma_buf_fd_export_supported ||
-           (physical_dev->is_opaque_fd_export_supported && no_dma_buf_export))) {
+          vkr_device_memory_can_use_external_export(
+             physical_dev->is_dma_buf_fd_export_supported,
+             physical_dev->is_opaque_fd_export_supported, no_dma_buf_export,
+             physical_dev->gbm_device != NULL)) {
          const VkExternalMemoryHandleTypeFlagBits handle_type =
             physical_dev->is_dma_buf_fd_export_supported
                ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
                : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
          if (export_info) {
+            if (handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT) {
+               export_info->handleTypes &=
+                  ~VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+            }
             export_info->handleTypes |= handle_type;
          } else {
             local_export_info = (const VkExportMemoryAllocateInfo){
@@ -308,25 +399,28 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
             };
             export_info = &local_export_info;
             alloc_info->pNext = &local_export_info;
+            might_export =
+               vkr_device_memory_should_track_implicit_export(handle_type);
+         }
 
-            if (handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT) {
-               /* Guest virtgpu kernel aligns up blob mem size to the page boundary. No
-                * matter dma-buf or opaque fd export allocation, the actual allocation
-                * in most cases would follow the same padding. For dma-buf, we are able
-                * to allocate and validate via lseek below. For opaque fd, Vulkan spec
-                * requires to use the same size with allocation time for the mapper,
-                * either vkr_allocator or vulkano, to import and populate the mapping.
-                * Accessible mapping given by vkMapMemory is normally limited to just the
-                * alloc size. When KVM register the mappings to guest pci bar, that
-                * involves an invalid chunk towards the end of the page boundary. As a
-                * result, any guest side accelerated instructions that rely on the
-                * paddings can end up with Illegal instruction error. The most common
-                * trigger is via memcpy'ing valid range to the guest side mapped buffer
-                * memory, and then, e.g. __memcpy_avx_unaligned_erms  can hit the error.
-                */
-               alloc_info->allocationSize =
-                  align(alloc_info->allocationSize, getpagesize());
-            }
+         if (handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT &&
+             vkr_device_memory_should_align_opaque_allocation(
+                export_info != &local_export_info, no_dma_buf_export)) {
+            /* Guest virtgpu kernel aligns up blob mem size to the page boundary. No
+             * matter dma-buf or opaque fd export allocation, the actual allocation
+             * in most cases would follow the same padding. For dma-buf, we are able
+             * to allocate and validate via lseek below. For opaque fd, Vulkan spec
+             * requires to use the same size with allocation time for the mapper,
+             * either vkr_allocator or vulkano, to import and populate the mapping.
+             * Accessible mapping given by vkMapMemory is normally limited to just the
+             * alloc size. When KVM register the mappings to guest pci bar, that
+             * involves an invalid chunk towards the end of the page boundary. As a
+             * result, any guest side accelerated instructions that rely on the
+             * paddings can end up with Illegal instruction error. The most common
+             * trigger is via memcpy'ing valid range to the guest side mapped buffer
+             * memory, and then, e.g. __memcpy_avx_unaligned_erms  can hit the error.
+             */
+            alloc_info->allocationSize = align(alloc_info->allocationSize, getpagesize());
          }
       } else if (physical_dev->EXT_external_memory_dma_buf) {
          /* Allocate dma_buf externally and force to import. */
@@ -380,6 +474,7 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
    mem->valid_fd_types = valid_fd_types;
    mem->udmabuf_fd = udmabuf_fd;
    mem->gbm_bo = gbm_bo;
+   mem->guest_visible_allocation_size = guest_visible_allocation_size;
    mem->allocation_size = alloc_info->allocationSize;
    mem->memory_type_index = mem_type_index;
 }
@@ -434,7 +529,26 @@ vkr_dispatch_vkGetMemoryResourcePropertiesMESA(
    struct vkr_resource *res = vkr_context_get_resource(ctx, args->resourceId);
    if (!res) {
       vkr_log("failed to query resource props: invalid res_id %u", args->resourceId);
-      vkr_context_set_fatal(ctx);
+      args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
+      return;
+   }
+
+   VkMemoryResourceAllocationSizePropertiesMESA *alloc_size_props =
+      vkr_find_struct(args->pMemoryResourceProperties->pNext,
+                      VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA);
+
+   if (res->fd_type == VIRGL_RESOURCE_FD_OPAQUE) {
+      const struct vkr_opaque_export_info *export_info;
+      args->ret = vkr_device_memory_get_opaque_export(
+         res, ctx->ctx_id, dev->base.id, &export_info);
+      if (args->ret != VK_SUCCESS)
+         return;
+
+      args->pMemoryResourceProperties->memoryTypeBits =
+         1u << export_info->memory_type_index;
+      if (alloc_size_props)
+         alloc_size_props->allocationSize =
+            export_info->guest_visible_allocation_size;
       return;
    }
 
@@ -458,9 +572,6 @@ vkr_dispatch_vkGetMemoryResourcePropertiesMESA(
 
    args->pMemoryResourceProperties->memoryTypeBits = mem_fd_props.memoryTypeBits;
 
-   VkMemoryResourceAllocationSizePropertiesMESA *alloc_size_props =
-      vkr_find_struct(args->pMemoryResourceProperties->pNext,
-                      VK_STRUCTURE_TYPE_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA);
    if (alloc_size_props)
       alloc_size_props->allocationSize = res->size;
 }
@@ -531,13 +642,13 @@ vkr_device_memory_export_blob(struct vkr_device_memory *mem,
    VkExternalMemoryHandleTypeFlagBits handle_type;
    struct virgl_resource_vulkan_info vulkan_info;
    if (blob_flags & VIRGL_RENDERER_BLOB_FLAG_USE_CROSS_DEVICE) {
-      if (!can_export_dma_buf) {
-         vkr_log("mem cannot export to dma_buf for cross device blob sharing");
+      if (!can_export_dma_buf && !can_export_opaque) {
+         vkr_log("mem cannot export for cross device blob sharing");
          return false;
       }
-      fd_type = VIRGL_RESOURCE_FD_DMABUF;
-      handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-   } else if (can_export_dma_buf) {
+   }
+
+   if (can_export_dma_buf) {
       /* prefer dmabuf for easier mapping? */
       fd_type = VIRGL_RESOURCE_FD_DMABUF;
       handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;

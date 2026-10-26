@@ -47,9 +47,7 @@
 #ifdef HAVE_EVENTFD_H
 #include <sys/eventfd.h>
 #endif
-#if defined (__FreeBSD__)
 #include <sys/stat.h>
-#endif
 
 #include "vtest.h"
 #include "vtest_shm.h"
@@ -82,6 +80,11 @@ struct vtest_resource {
    uint32_t res_id;
 
    struct iovec iov;
+
+   dev_t fd_dev;
+   ino_t fd_ino;
+   int ctx_id;
+   bool owns_resource;
 };
 
 struct vtest_sync {
@@ -252,7 +255,8 @@ static struct vtest_renderer renderer = {
    .next_sync_id = 1,
 };
 
-static struct vtest_resource *vtest_new_resource(uint32_t client_res_id)
+static struct vtest_resource *
+vtest_new_resource(uint32_t client_res_id, int ctx_id)
 {
    struct vtest_resource *res;
 
@@ -271,16 +275,24 @@ static struct vtest_resource *vtest_new_resource(uint32_t client_res_id)
    res->res_id = client_res_id ? client_res_id : res->server_res_id;
    res->iov.iov_base = NULL;
    res->iov.iov_len = 0;
+   res->fd_dev = 0;
+   res->fd_ino = 0;
+   res->ctx_id = ctx_id;
+   res->owns_resource = true;
 
    return res;
 }
 
 static void vtest_unref_resource(struct vtest_resource *res)
 {
-   /* virgl_renderer_ctx_detach_resource and virgl_renderer_resource_detach_iov
-    * are implied
-    */
-   virgl_renderer_resource_unref(res->res_id);
+   if (res->owns_resource) {
+      /* virgl_renderer_ctx_detach_resource and
+       * virgl_renderer_resource_detach_iov are implied.
+       */
+      virgl_renderer_resource_unref(res->res_id);
+   } else {
+      virgl_renderer_ctx_detach_resource(res->ctx_id, res->res_id);
+   }
 
    if (res->iov.iov_base)
       munmap(res->iov.iov_base, res->iov.iov_len);
@@ -1263,7 +1275,7 @@ static int vtest_create_resource_internal(struct vtest_context *ctx,
       }
    }
 
-   res = vtest_new_resource(args->handle);
+   res = vtest_new_resource(args->handle, ctx->ctx_id);
    if (!res)
       return -ENOMEM;
    args->handle = res->res_id;
@@ -1353,6 +1365,7 @@ int vtest_resource_create_blob(UNUSED uint32_t length_dw)
    uint32_t resp_buf[VTEST_HDR_SIZE + 1];
    struct virgl_renderer_resource_create_blob_args args;
    struct vtest_resource *res;
+   uint32_t fd_type = UINT32_MAX;
    int fd;
    int ret;
 
@@ -1369,7 +1382,7 @@ int vtest_resource_create_blob(UNUSED uint32_t length_dw)
    args.blob_id = res_create_blob_buf[VCMD_RES_CREATE_BLOB_ID_LO];
    args.blob_id |= (uint64_t)res_create_blob_buf[VCMD_RES_CREATE_BLOB_ID_HI] << 32;
 
-   res = vtest_new_resource(0);
+   res = vtest_new_resource(0, ctx->ctx_id);
    if (!res)
       return -ENOMEM;
 
@@ -1406,19 +1419,28 @@ int vtest_resource_create_blob(UNUSED uint32_t length_dw)
 
    /* export blob */
    if (args.blob_mem == VIRGL_RENDERER_BLOB_MEM_HOST3D) {
-      uint32_t fd_type;
       ret = virgl_renderer_resource_export_blob(res->res_id, &fd_type, &fd);
       if (ret) {
          vtest_unref_resource(res);
          return report_failed_call("virgl_renderer_resource_export_blob", ret);
       }
       if (fd_type != VIRGL_RENDERER_BLOB_FD_TYPE_DMABUF &&
+          fd_type != VIRGL_RENDERER_BLOB_FD_TYPE_OPAQUE &&
           fd_type != VIRGL_RENDERER_BLOB_FD_TYPE_SHM) {
          close(fd);
          vtest_unref_resource(res);
          return report_failed_call("virgl_renderer_resource_export_blob", -EINVAL);
       }
    }
+
+   struct stat fd_stat;
+   if (fstat(fd, &fd_stat)) {
+      close(fd);
+      vtest_unref_resource(res);
+      return report_failed_call("fstat", -errno);
+   }
+   res->fd_dev = fd_stat.st_dev;
+   res->fd_ino = fd_stat.st_ino;
 
    virgl_renderer_ctx_attach_resource(ctx->ctx_id, res->res_id);
 
@@ -1445,6 +1467,86 @@ int vtest_resource_create_blob(UNUSED uint32_t length_dw)
    util_hash_table_set(ctx->resource_table, intptr_to_pointer(res->res_id), res);
 
    return 0;
+}
+
+struct vtest_import_search {
+   dev_t fd_dev;
+   ino_t fd_ino;
+   struct vtest_resource *res;
+};
+
+static enum pipe_error
+vtest_find_import_resource(UNUSED void *key, void *value, void *data)
+{
+   struct vtest_import_search *search = data;
+   struct vtest_resource *res = value;
+
+   if (res->fd_dev == search->fd_dev && res->fd_ino == search->fd_ino) {
+      search->res = res;
+      return PIPE_ERROR;
+   }
+
+   return PIPE_OK;
+}
+
+int
+vtest_resource_import_blob(UNUSED uint32_t length_dw)
+{
+   struct vtest_context *ctx = vtest_get_current_context();
+   uint32_t resp[VTEST_HDR_SIZE + 2] = {
+      [VTEST_CMD_LEN] = 2,
+      [VTEST_CMD_ID] = VCMD_RESOURCE_IMPORT_BLOB,
+      [VTEST_CMD_DATA_START] = VCMD_VK_ERROR_INVALID_EXTERNAL_HANDLE,
+      [VTEST_CMD_DATA_START + 1] = 0,
+   };
+   if (ctx->input->read != vtest_block_read)
+      return -EINVAL;
+
+   int fd = vtest_receive_fd(ctx->input->data.fd);
+   if (fd < 0)
+      return fd;
+
+   struct stat fd_stat;
+   if (!fstat(fd, &fd_stat)) {
+      struct vtest_import_search search = {
+         .fd_dev = fd_stat.st_dev,
+         .fd_ino = fd_stat.st_ino,
+      };
+      struct vtest_context *search_ctx;
+      LIST_FOR_EACH_ENTRY(search_ctx, &renderer.active_contexts, head) {
+         util_hash_table_foreach(search_ctx->resource_table,
+                                 vtest_find_import_resource, &search);
+         if (search.res)
+            break;
+      }
+
+      if (search.res) {
+         struct vtest_resource *existing = util_hash_table_get(
+            ctx->resource_table, intptr_to_pointer(search.res->res_id));
+         if (!existing) {
+            struct vtest_resource *alias = vtest_new_resource(0, ctx->ctx_id);
+            if (!alias) {
+               close(fd);
+               return -ENOMEM;
+            }
+
+            alias->res_id = search.res->res_id;
+            alias->fd_dev = search.res->fd_dev;
+            alias->fd_ino = search.res->fd_ino;
+            alias->owns_resource = false;
+            virgl_renderer_ctx_attach_resource(ctx->ctx_id, alias->res_id);
+            util_hash_table_set(ctx->resource_table,
+                                intptr_to_pointer(alias->res_id), alias);
+         }
+
+         resp[VTEST_CMD_DATA_START] = 0;
+         resp[VTEST_CMD_DATA_START + 1] = search.res->res_id;
+      }
+   }
+   close(fd);
+
+   int ret = vtest_block_write(ctx->out_fd, resp, sizeof(resp));
+   return ret < 0 ? ret : 0;
 }
 
 int vtest_resource_unref(UNUSED uint32_t length_dw)

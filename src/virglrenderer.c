@@ -495,7 +495,7 @@ static int virgl_renderer_resource_get_info_common(int res_handle,
       return EINVAL;
 
    info->handle = res_handle;
-   info->fd = res->fd;
+   info->fd = res->fd_type == VIRGL_RESOURCE_FD_OPAQUE ? -1 : res->fd;
 
    if (!res->pipe_resource)
       return 0;

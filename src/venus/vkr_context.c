@@ -235,6 +235,7 @@ vkr_context_import_resource_internal(struct vkr_context *ctx,
    res->res_id = res_id;
    res->fd_type = fd_type;
    res->size = blob_size;
+   res->opaque_export.valid = false;
 
    /* fd and mmap_ptr cannot be valid at the same time, but allowed to be -1 and NULL */
    assert(fd < 0 || !mmap_ptr);
@@ -343,6 +344,19 @@ vkr_context_create_resource_from_device_memory(struct vkr_context *ctx,
          close(res_fd);
       close(blob.u.fd);
       return false;
+   }
+
+   if (blob.type == VIRGL_RESOURCE_FD_OPAQUE && res_fd >= 0) {
+      struct vkr_resource *res = vkr_context_get_resource(ctx, res_id);
+      assert(res);
+      res->opaque_export.valid = true;
+      res->opaque_export.context_id = ctx->ctx_id;
+      res->opaque_export.device_id = mem->device->base.id;
+      res->opaque_export.guest_visible_allocation_size =
+         mem->guest_visible_allocation_size;
+      res->opaque_export.driver_allocation_size = mem->allocation_size;
+      res->opaque_export.memory_type_index = mem->memory_type_index;
+      res->opaque_export.fd_offset = lseek(res_fd, 0, SEEK_CUR);
    }
 
    *out_blob = blob;

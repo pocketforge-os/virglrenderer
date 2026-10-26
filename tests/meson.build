@@ -74,6 +74,26 @@ foreach t : tests
    test(t[0], test_virgl)
 endforeach
 
+if with_venus
+   test_venus_memory_export = executable(
+      'test_venus_memory_export',
+      'test_venus_memory_export.c',
+      include_directories : include_directories('../src/mesa', '../src/mesa/compat'),
+      dependencies : [libvirglrenderer_dep, venus_dep])
+   test('venus-memory-never-replace-dma-buf', test_venus_memory_export,
+        args : ['never-replace-dma-buf'])
+   test('venus-memory-preserve-gbm-dma-buf-path', test_venus_memory_export,
+        args : ['preserve-gbm-dma-buf-path'])
+   test('venus-memory-track-implicit-opaque-only', test_venus_memory_export,
+        args : ['track-implicit-opaque-only'])
+   test('venus-memory-hide-opaque-get-info', test_venus_memory_export,
+        args : ['hide-opaque-get-info'])
+   test('venus-memory-preserve-dma-buf-get-info', test_venus_memory_export,
+        args : ['preserve-dma-buf-get-info'])
+   test('venus-memory-opaque-import-validation', test_venus_memory_export,
+        args : ['opaque-import-validation'])
+endif
+
 # For some unknown reason running this test in paralel with the others
 # breaks some tests, so run it sequentially until we figure out what
 # goes wrong

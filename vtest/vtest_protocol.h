@@ -94,6 +94,9 @@
 #define VCMD_DRM_SYNC_TRANSFER 37
 #define VCMD_RESOURCE_EXPORT_FD 38
 
+/* PocketForge test-only fd-to-resource import; not part of upstream vtest. */
+#define VCMD_RESOURCE_IMPORT_BLOB 39
+
 #define VCMD_RES_CREATE_SIZE 10
 #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
 #define VCMD_RES_CREATE_TARGET 1
@@ -348,5 +351,9 @@ struct vcmd_submit_cmd2_batch {
 #define VCMD_RESOURCE_EXPORT_FD_SIZE 1
 #define VCMD_RESOURCE_EXPORT_FD_RES_HANDLE 0
 /* rsp fd */
+
+#define VCMD_RESOURCE_IMPORT_BLOB_SIZE 0
+/* req fd, rsp VkResult and res_id */
+#define VCMD_VK_ERROR_INVALID_EXTERNAL_HANDLE (-1000072003)
 
 #endif /* VTEST_PROTOCOL */

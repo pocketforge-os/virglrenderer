@@ -1,0 +1,163 @@
+diff --git a/src/virtio/vtest/vtest_protocol.h b/src/virtio/vtest/vtest_protocol.h
+index 1bd515c5..a55e1ab0 100644
+--- a/src/virtio/vtest/vtest_protocol.h
++++ b/src/virtio/vtest/vtest_protocol.h
+@@ -94,5 +94,7 @@
+ #define VCMD_DRM_SYNC_TRANSFER 37
+ #define VCMD_RESOURCE_EXPORT_FD 38
++/* PocketForge test-only fd-to-resource import; not part of upstream vtest. */
++#define VCMD_RESOURCE_IMPORT_BLOB 39
+
+ #define VCMD_RES_CREATE_SIZE 10
+ #define VCMD_RES_CREATE_RES_HANDLE 0 /* must be 0 since protocol version 3 */
+@@ -349,4 +351,7 @@ struct vcmd_submit_cmd2_batch {
+ #define VCMD_RESOURCE_EXPORT_FD_RES_HANDLE 0
+ /* rsp fd */
+
++#define VCMD_RESOURCE_IMPORT_BLOB_SIZE 0
++/* req fd, rsp VkResult and res_id */
++
+ #endif /* VTEST_PROTOCOL */
+diff --git a/src/virtio/vulkan/vn_renderer_vtest.c b/src/virtio/vulkan/vn_renderer_vtest.c
+index 1675472ed22..66f6e41fb9b 100644
+--- a/src/virtio/vulkan/vn_renderer_vtest.c
++++ b/src/virtio/vulkan/vn_renderer_vtest.c
+@@ -137,6 +137,33 @@ vtest_receive_fd(struct vtest *vtest)
+    return *((int *)CMSG_DATA(cmsg));
+ }
+
++static void
++vtest_send_fd(struct vtest *vtest, int fd)
++{
++   char cmsg_buf[CMSG_SPACE(sizeof(int))];
++   char dummy = 0;
++   struct msghdr msg = {
++      .msg_iov =
++         &(struct iovec){
++            .iov_base = &dummy,
++            .iov_len = sizeof(dummy),
++         },
++      .msg_iovlen = 1,
++      .msg_control = cmsg_buf,
++      .msg_controllen = sizeof(cmsg_buf),
++   };
++   struct cmsghdr *cmsg = CMSG_FIRSTHDR(&msg);
++   cmsg->cmsg_level = SOL_SOCKET;
++   cmsg->cmsg_type = SCM_RIGHTS;
++   cmsg->cmsg_len = CMSG_LEN(sizeof(int));
++   *((int *)CMSG_DATA(cmsg)) = fd;
++
++   if (sendmsg(vtest->sock_fd, &msg, 0) < 0) {
++      vn_log(vtest->instance, "sendmsg failed: %s", strerror(errno));
++      abort();
++   }
++}
++
+ static void
+ vtest_write(struct vtest *vtest, const void *buf, size_t size)
+ {
+@@ -351,6 +378,29 @@ vtest_vcmd_resource_create_blob(struct vtest *vtest,
+    return res_id;
+ }
+
++static VkResult
++vtest_vcmd_resource_import_blob(struct vtest *vtest,
++                                int fd,
++                                uint32_t *res_id)
++{
++   uint32_t vtest_hdr[VTEST_HDR_SIZE] = {
++      [VTEST_CMD_LEN] = VCMD_RESOURCE_IMPORT_BLOB_SIZE,
++      [VTEST_CMD_ID] = VCMD_RESOURCE_IMPORT_BLOB,
++   };
++   uint32_t resp[2];
++
++   vtest_write(vtest, vtest_hdr, sizeof(vtest_hdr));
++   vtest_send_fd(vtest, fd);
++
++   vtest_read(vtest, vtest_hdr, sizeof(vtest_hdr));
++   assert(vtest_hdr[VTEST_CMD_LEN] == 2);
++   assert(vtest_hdr[VTEST_CMD_ID] == VCMD_RESOURCE_IMPORT_BLOB);
++   vtest_read(vtest, resp, sizeof(resp));
++
++   *res_id = resp[1];
++   return (VkResult)(int32_t)resp[0];
++}
++
+ static void
+ vtest_vcmd_resource_unref(struct vtest *vtest, uint32_t res_id)
+ {
+@@ -753,7 +803,10 @@ vtest_bo_create_from_device_memory(
+    struct vn_renderer_bo **out_bo)
+ {
+    struct vtest *vtest = (struct vtest *)renderer;
+-   const uint32_t blob_flags = vtest_bo_blob_flags(flags, external_handles);
++   uint32_t blob_flags = vtest_bo_blob_flags(flags, external_handles);
++   const char *force_shareable = getenv("VN_VTEST_FORCE_SHAREABLE");
++   if (force_shareable && force_shareable[0] == '1')
++      blob_flags |= VCMD_BLOB_FLAG_SHAREABLE;
+
+    mtx_lock(&vtest->sock_mutex);
+    int res_fd;
+@@ -783,7 +832,52 @@ vtest_bo_create_from_device_memory(
+    return VK_SUCCESS;
+ }
+
++static VkResult
++vtest_bo_create_from_dma_buf(struct vn_renderer *renderer,
++                             VkDeviceSize size,
++                             int fd,
++                             VkMemoryPropertyFlags flags,
++                             struct vn_renderer_bo **out_bo)
++{
++   struct vtest *vtest = (struct vtest *)renderer;
++   uint32_t res_id;
++
++   mtx_lock(&vtest->sock_mutex);
++   VkResult result = vtest_vcmd_resource_import_blob(vtest, fd, &res_id);
++   mtx_unlock(&vtest->sock_mutex);
++   if (result != VK_SUCCESS)
++      return result;
++
++   struct vtest_bo *bo = util_sparse_array_get(&vtest->bo_array, res_id);
++   if (vn_refcount_is_valid(&bo->base.refcount)) {
++      bo->base.mmap_size = MAX2(bo->base.mmap_size, size);
++      vn_refcount_inc(&bo->base.refcount);
++   } else {
++      const int res_fd = os_dupfd_cloexec(fd);
++      if (res_fd < 0) {
++         mtx_lock(&vtest->sock_mutex);
++         vtest_vcmd_resource_unref(vtest, res_id);
++         mtx_unlock(&vtest->sock_mutex);
++         return VK_ERROR_TOO_MANY_OBJECTS;
++      }
++
++      *bo = (struct vtest_bo){
++         .base = {
++            .refcount = VN_REFCOUNT_INIT(1),
++            .res_id = res_id,
++            .mmap_size = size,
++         },
++         .res_fd = res_fd,
++         .blob_flags = vtest_bo_blob_flags(
++            flags, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT),
++      };
++   }
++   *out_bo = &bo->base;
++
++   return VK_SUCCESS;
++}
++
+ static void
+ vtest_shmem_destroy_now(struct vn_renderer *renderer,
+                         struct vn_renderer_shmem *_shmem)
+ {
+@@ -1070,7 +1164,8 @@ vtest_init(struct vtest *vtest)
+
+    vtest->base.bo_ops.create_from_device_memory =
+       vtest_bo_create_from_device_memory;
+-   vtest->base.bo_ops.create_from_dma_buf = NULL;
++   vtest->base.bo_ops.create_from_dma_buf =
++      vtest_bo_create_from_dma_buf;
+    vtest->base.bo_ops.destroy = vtest_bo_destroy;
+    vtest->base.bo_ops.export_dma_buf = vtest_bo_export_dma_buf;
+    vtest->base.bo_ops.export_sync_file =
