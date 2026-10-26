@@ -706,6 +706,7 @@ static const struct vtest_command {
    HANDLER(GET_CAPSET,              get_capset,            false),
    HANDLER(CONTEXT_INIT,            context_init,          false),
    HANDLER(RESOURCE_CREATE_BLOB,    resource_create_blob,  true ),
+   HANDLER(RESOURCE_IMPORT_BLOB,    resource_import_blob,  true ),
    HANDLER(SYNC_CREATE,             sync_create,           true ),
    HANDLER(SYNC_UNREF,              sync_unref,            true ),
    HANDLER(SYNC_READ,               sync_read,             true ),
