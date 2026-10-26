@@ -282,23 +282,19 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
    void *gbm_bo = NULL;
    VkExportMemoryAllocateInfo local_export_info;
    if ((property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !res_info) {
-      /* An implementation can support dma_buf import along with opaque fd export/import.
-       * If the client driver is using external memory and requesting dma_buf, without
-       * dma_buf fd export support, we must use gbm bo import path instead of forcing
-       * opaque fd export. e.g. the client driver uses external memory for wsi image.
-       */
-      const bool no_dma_buf_export =
-         !export_info ||
-         !(export_info->handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
       const bool force_udmabuf_import = physical_dev->udmabuf_dev_fd >= 0;
       if (!force_udmabuf_import &&
           (physical_dev->is_dma_buf_fd_export_supported ||
-           (physical_dev->is_opaque_fd_export_supported && no_dma_buf_export))) {
+           physical_dev->is_opaque_fd_export_supported)) {
          const VkExternalMemoryHandleTypeFlagBits handle_type =
             physical_dev->is_dma_buf_fd_export_supported
                ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
                : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
          if (export_info) {
+            if (handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT) {
+               export_info->handleTypes &=
+                  ~VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+            }
             export_info->handleTypes |= handle_type;
          } else {
             local_export_info = (const VkExportMemoryAllocateInfo){
@@ -531,13 +527,13 @@ vkr_device_memory_export_blob(struct vkr_device_memory *mem,
    VkExternalMemoryHandleTypeFlagBits handle_type;
    struct virgl_resource_vulkan_info vulkan_info;
    if (blob_flags & VIRGL_RENDERER_BLOB_FLAG_USE_CROSS_DEVICE) {
-      if (!can_export_dma_buf) {
-         vkr_log("mem cannot export to dma_buf for cross device blob sharing");
+      if (!can_export_dma_buf && !can_export_opaque) {
+         vkr_log("mem cannot export for cross device blob sharing");
          return false;
       }
-      fd_type = VIRGL_RESOURCE_FD_DMABUF;
-      handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
-   } else if (can_export_dma_buf) {
+   }
+
+   if (can_export_dma_buf) {
       /* prefer dmabuf for easier mapping? */
       fd_type = VIRGL_RESOURCE_FD_DMABUF;
       handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
