@@ -21,6 +21,10 @@ case "$VN_ALLOC_MODE" in
    async) vn_perf= ;;
    *) echo "unknown allocation mode: $VN_ALLOC_MODE" >&2; exit 2 ;;
 esac
+vtest_force_shareable=
+if [ "$case_name" = implicit-unaligned ]; then
+   vtest_force_shareable=1
+fi
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 server=$HOST_BUILD/vtest/virgl_test_server
@@ -93,6 +97,7 @@ fi
 set +e
 timeout 20s env VK_DRIVER_FILES="$GUEST_ICD" VN_DEBUG=vtest \
    VN_ALLOC_MODE="$VN_ALLOC_MODE" VN_PERF="$vn_perf" \
+   VN_VTEST_FORCE_SHAREABLE="$vtest_force_shareable" \
    VTEST_SOCKET_NAME="$socket" "$client" "$case_name" \
    >"$prefix.client.log" 2>&1
 client_status=$?

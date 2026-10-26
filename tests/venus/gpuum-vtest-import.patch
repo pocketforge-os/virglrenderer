@@ -86,6 +86,18 @@ index 1675472ed22..66f6e41fb9b 100644
  static void
  vtest_vcmd_resource_unref(struct vtest *vtest, uint32_t res_id)
  {
+@@ -753,7 +803,10 @@ vtest_bo_create_from_device_memory(
+    struct vn_renderer_bo **out_bo)
+ {
+    struct vtest *vtest = (struct vtest *)renderer;
+-   const uint32_t blob_flags = vtest_bo_blob_flags(flags, external_handles);
++   uint32_t blob_flags = vtest_bo_blob_flags(flags, external_handles);
++   const char *force_shareable = getenv("VN_VTEST_FORCE_SHAREABLE");
++   if (force_shareable && force_shareable[0] == '1')
++      blob_flags |= VCMD_BLOB_FLAG_SHAREABLE;
+
+    mtx_lock(&vtest->sock_mutex);
+    int res_fd;
 @@ -783,7 +832,52 @@ vtest_bo_create_from_device_memory(
     return VK_SUCCESS;
  }
