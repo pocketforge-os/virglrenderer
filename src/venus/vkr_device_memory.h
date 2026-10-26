@@ -30,9 +30,9 @@ vkr_device_memory_should_align_opaque_allocation(bool has_export_info,
 
 static inline bool
 vkr_device_memory_should_track_implicit_export(
-   UNUSED VkExternalMemoryHandleTypeFlagBits handle_type)
+   VkExternalMemoryHandleTypeFlagBits handle_type)
 {
-   return false;
+   return handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
 }
 
 struct vkr_device_memory {
@@ -51,6 +51,7 @@ struct vkr_device_memory {
    /* udmabuf backing non-external mappable memory */
    int udmabuf_fd;
 
+   uint64_t guest_visible_allocation_size;
    uint64_t allocation_size;
    uint32_t memory_type_index;
 
@@ -75,6 +76,7 @@ vkr_device_memory_validate_opaque_resource(const struct vkr_resource *res,
                                            uint32_t context_id,
                                            vkr_object_id device_id,
                                            uint64_t allocation_size,
-                                           uint32_t memory_type_index);
+                                           uint32_t memory_type_index,
+                                           uint64_t *out_driver_allocation_size);
 
 #endif /* VKR_DEVICE_MEMORY_H */

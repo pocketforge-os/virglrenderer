@@ -43,6 +43,7 @@ run_export(bool dma_buf, bool opaque, bool cross_device, uint64_t blob_size,
          (dma_buf ? 1u << VIRGL_RESOURCE_FD_DMABUF : 0) |
          (opaque ? 1u << VIRGL_RESOURCE_FD_OPAQUE : 0),
       .udmabuf_fd = -1,
+      .guest_visible_allocation_size = 4096,
       .allocation_size = 4096,
       .memory_type_index = 2,
    };
@@ -190,7 +191,8 @@ test_opaque_import_validation(void)
          .valid = true,
          .context_id = 1,
          .device_id = 2,
-         .allocation_size = 4096,
+         .guest_visible_allocation_size = 4352,
+         .driver_allocation_size = 8192,
          .memory_type_index = 3,
          .fd_offset = 0,
       },
@@ -199,22 +201,29 @@ test_opaque_import_validation(void)
    if (lseek(backing_fd, 0, SEEK_SET) != 0)
       return 2;
 
-   if (vkr_device_memory_validate_opaque_resource(&resource, 1, 2, 4096, 3) !=
-          VK_SUCCESS ||
-       vkr_device_memory_validate_opaque_resource(&resource, 9, 2, 4096, 3) !=
+   uint64_t driver_allocation_size = 0;
+   if (vkr_device_memory_validate_opaque_resource(
+          &resource, 1, 2, 4352, 3, &driver_allocation_size) != VK_SUCCESS ||
+       driver_allocation_size != 8192 ||
+       vkr_device_memory_validate_opaque_resource(
+          &resource, 9, 2, 4352, 3, NULL) !=
           VK_ERROR_INVALID_EXTERNAL_HANDLE ||
-       vkr_device_memory_validate_opaque_resource(&resource, 1, 9, 4096, 3) !=
+       vkr_device_memory_validate_opaque_resource(
+          &resource, 1, 9, 4352, 3, NULL) !=
           VK_ERROR_INVALID_EXTERNAL_HANDLE ||
-       vkr_device_memory_validate_opaque_resource(&resource, 1, 2, 8192, 3) !=
+       vkr_device_memory_validate_opaque_resource(
+          &resource, 1, 2, 8192, 3, NULL) !=
           VK_ERROR_INVALID_EXTERNAL_HANDLE ||
-       vkr_device_memory_validate_opaque_resource(&resource, 1, 2, 4096, 4) !=
+       vkr_device_memory_validate_opaque_resource(
+          &resource, 1, 2, 4352, 4, NULL) !=
           VK_ERROR_INVALID_EXTERNAL_HANDLE) {
       fprintf(stderr, "opaque resource metadata validation mismatch\n");
       return 1;
    }
 
    if (lseek(backing_fd, 1, SEEK_SET) != 1 ||
-       vkr_device_memory_validate_opaque_resource(&resource, 1, 2, 4096, 3) !=
+       vkr_device_memory_validate_opaque_resource(
+          &resource, 1, 2, 4352, 3, NULL) !=
           VK_ERROR_INVALID_EXTERNAL_HANDLE) {
       fprintf(stderr, "opaque resource offset validation mismatch\n");
       return 1;

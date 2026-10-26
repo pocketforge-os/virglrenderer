@@ -13,7 +13,7 @@
 static bool
 vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
                                    const struct vkr_device *dev,
-                                   uint64_t allocation_size,
+                                   uint64_t *allocation_size,
                                    uint32_t memory_type_index,
                                    const VkImportMemoryResourceInfoMESA *res_info,
                                    VkImportMemoryFdInfoKHR *out)
@@ -31,8 +31,8 @@ vkr_get_fd_info_from_resource_info(struct vkr_context *ctx,
       break;
    case VIRGL_RESOURCE_FD_OPAQUE:
       if (vkr_device_memory_validate_opaque_resource(
-             res, ctx->ctx_id, dev->base.id, allocation_size,
-             memory_type_index) != VK_SUCCESS)
+             res, ctx->ctx_id, dev->base.id, *allocation_size,
+             memory_type_index, allocation_size) != VK_SUCCESS)
          return false;
       handle_type = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
       break;
@@ -86,7 +86,8 @@ vkr_device_memory_validate_opaque_resource(const struct vkr_resource *res,
                                            uint32_t context_id,
                                            vkr_object_id device_id,
                                            uint64_t allocation_size,
-                                           uint32_t memory_type_index)
+                                           uint32_t memory_type_index,
+                                           uint64_t *out_driver_allocation_size)
 {
    const struct vkr_opaque_export_info *export_info;
    VkResult result = vkr_device_memory_get_opaque_export(
@@ -94,7 +95,7 @@ vkr_device_memory_validate_opaque_resource(const struct vkr_resource *res,
    if (result != VK_SUCCESS)
       return result;
 
-   if (export_info->allocation_size != allocation_size) {
+   if (export_info->guest_visible_allocation_size != allocation_size) {
       vkr_log("opaque resource allocation size does not match export");
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
    }
@@ -103,6 +104,9 @@ vkr_device_memory_validate_opaque_resource(const struct vkr_resource *res,
       vkr_log("opaque resource memory type does not match export");
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
    }
+
+   if (out_driver_allocation_size)
+      *out_driver_allocation_size = export_info->driver_allocation_size;
 
    return VK_SUCCESS;
 }
@@ -297,6 +301,7 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
    struct vkr_physical_device *physical_dev = dev->physical_device;
 
    VkMemoryAllocateInfo *alloc_info = (VkMemoryAllocateInfo *)args->pAllocateInfo;
+   const uint64_t guest_visible_allocation_size = alloc_info->allocationSize;
    const uint32_t mem_type_index = alloc_info->memoryTypeIndex;
    VkImportMemoryResourceInfoMESA *res_info = NULL;
    VkBaseInStructure *prev_of_res_info = vkr_find_prev_struct(
@@ -315,7 +320,7 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
          if (res->fd_type == VIRGL_RESOURCE_FD_OPAQUE) {
             vkr_device_memory_validate_opaque_resource(
                res, ctx->ctx_id, dev->base.id, alloc_info->allocationSize,
-               mem_type_index);
+               mem_type_index, NULL);
             args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
             return;
          }
@@ -328,7 +333,7 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
    VkImportMemoryFdInfoKHR local_import_info = { .fd = -1 };
    if (prev_of_res_info) {
       res_info = (VkImportMemoryResourceInfoMESA *)prev_of_res_info->pNext;
-      if (!vkr_get_fd_info_from_resource_info(ctx, dev, alloc_info->allocationSize,
+      if (!vkr_get_fd_info_from_resource_info(ctx, dev, &alloc_info->allocationSize,
                                               mem_type_index, res_info,
                                               &local_import_info)) {
          args->ret = VK_ERROR_INVALID_EXTERNAL_HANDLE;
@@ -469,6 +474,7 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
    mem->valid_fd_types = valid_fd_types;
    mem->udmabuf_fd = udmabuf_fd;
    mem->gbm_bo = gbm_bo;
+   mem->guest_visible_allocation_size = guest_visible_allocation_size;
    mem->allocation_size = alloc_info->allocationSize;
    mem->memory_type_index = mem_type_index;
 }
@@ -541,7 +547,8 @@ vkr_dispatch_vkGetMemoryResourcePropertiesMESA(
       args->pMemoryResourceProperties->memoryTypeBits =
          1u << export_info->memory_type_index;
       if (alloc_size_props)
-         alloc_size_props->allocationSize = export_info->allocation_size;
+         alloc_size_props->allocationSize =
+            export_info->guest_visible_allocation_size;
       return;
    }
 

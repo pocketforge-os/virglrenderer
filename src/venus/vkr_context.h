@@ -25,7 +25,8 @@ struct vkr_opaque_export_info {
    bool valid;
    uint32_t context_id;
    vkr_object_id device_id;
-   uint64_t allocation_size;
+   uint64_t guest_visible_allocation_size;
+   uint64_t driver_allocation_size;
    uint32_t memory_type_index;
    off_t fd_offset;
 };

@@ -352,7 +352,9 @@ vkr_context_create_resource_from_device_memory(struct vkr_context *ctx,
       res->opaque_export.valid = true;
       res->opaque_export.context_id = ctx->ctx_id;
       res->opaque_export.device_id = mem->device->base.id;
-      res->opaque_export.allocation_size = mem->allocation_size;
+      res->opaque_export.guest_visible_allocation_size =
+         mem->guest_visible_allocation_size;
+      res->opaque_export.driver_allocation_size = mem->allocation_size;
       res->opaque_export.memory_type_index = mem->memory_type_index;
       res->opaque_export.fd_offset = lseek(res_fd, 0, SEEK_CUR);
    }
