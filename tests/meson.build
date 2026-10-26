@@ -82,6 +82,8 @@ if with_venus
       dependencies : [libvirgl_dep, venus_dep])
    test('venus-memory-never-replace-dma-buf', test_venus_memory_export,
         args : ['never-replace-dma-buf'])
+   test('venus-memory-preserve-gbm-dma-buf-path', test_venus_memory_export,
+        args : ['preserve-gbm-dma-buf-path'])
 endif
 
 # For some unknown reason running this test in paralel with the others

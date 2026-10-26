@@ -76,11 +76,30 @@ test_never_replace_dma_buf(void)
    return 0;
 }
 
+static int
+test_preserve_gbm_dma_buf_path(void)
+{
+   if (vkr_device_memory_can_use_external_export(false, true, false, true)) {
+      fprintf(stderr, "opaque fallback replaced the GBM dma-buf path\n");
+      return 1;
+   }
+
+   if (!vkr_device_memory_can_use_external_export(false, true, false, false)) {
+      fprintf(stderr, "opaque fallback unavailable without a GBM device\n");
+      return 1;
+   }
+
+   puts("PASS preserve-gbm-dma-buf-path");
+   return 0;
+}
+
 int
 main(int argc, char **argv)
 {
    if (argc != 2) {
-      fprintf(stderr, "usage: %s never-replace-dma-buf\n", argv[0]);
+      fprintf(stderr,
+              "usage: %s never-replace-dma-buf|preserve-gbm-dma-buf-path\n",
+              argv[0]);
       return 2;
    }
 
@@ -94,6 +113,8 @@ main(int argc, char **argv)
    int ret;
    if (!strcmp(argv[1], "never-replace-dma-buf"))
       ret = test_never_replace_dma_buf();
+   else if (!strcmp(argv[1], "preserve-gbm-dma-buf-path"))
+      ret = test_preserve_gbm_dma_buf_path();
    else
       ret = 2;
 

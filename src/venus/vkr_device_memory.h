@@ -10,6 +10,16 @@
 
 struct gbm_bo;
 
+static inline bool
+vkr_device_memory_can_use_external_export(bool dma_buf_supported,
+                                          bool opaque_supported,
+                                          bool no_dma_buf_export,
+                                          bool has_gbm_device)
+{
+   return dma_buf_supported ||
+          (opaque_supported && (no_dma_buf_export || !has_gbm_device));
+}
+
 struct vkr_device_memory {
    struct vkr_object base;
 

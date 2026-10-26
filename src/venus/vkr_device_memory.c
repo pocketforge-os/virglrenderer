@@ -282,10 +282,20 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
    void *gbm_bo = NULL;
    VkExportMemoryAllocateInfo local_export_info;
    if ((property_flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) && !res_info) {
+      /* An implementation can support dma_buf import along with opaque fd export/import.
+       * If the client driver is using external memory and requesting dma_buf, without
+       * dma_buf fd export support, we must use gbm bo import path instead of forcing
+       * opaque fd export. e.g. the client driver uses external memory for wsi image.
+       */
+      const bool no_dma_buf_export =
+         !export_info ||
+         !(export_info->handleTypes & VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);
       const bool force_udmabuf_import = physical_dev->udmabuf_dev_fd >= 0;
       if (!force_udmabuf_import &&
-          (physical_dev->is_dma_buf_fd_export_supported ||
-           physical_dev->is_opaque_fd_export_supported)) {
+          vkr_device_memory_can_use_external_export(
+             physical_dev->is_dma_buf_fd_export_supported,
+             physical_dev->is_opaque_fd_export_supported, no_dma_buf_export,
+             physical_dev->gbm_device != NULL)) {
          const VkExternalMemoryHandleTypeFlagBits handle_type =
             physical_dev->is_dma_buf_fd_export_supported
                ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT
@@ -304,25 +314,24 @@ vkr_dispatch_vkAllocateMemory(struct vn_dispatch_context *dispatch,
             };
             export_info = &local_export_info;
             alloc_info->pNext = &local_export_info;
+         }
 
-            if (handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT) {
-               /* Guest virtgpu kernel aligns up blob mem size to the page boundary. No
-                * matter dma-buf or opaque fd export allocation, the actual allocation
-                * in most cases would follow the same padding. For dma-buf, we are able
-                * to allocate and validate via lseek below. For opaque fd, Vulkan spec
-                * requires to use the same size with allocation time for the mapper,
-                * either vkr_allocator or vulkano, to import and populate the mapping.
-                * Accessible mapping given by vkMapMemory is normally limited to just the
-                * alloc size. When KVM register the mappings to guest pci bar, that
-                * involves an invalid chunk towards the end of the page boundary. As a
-                * result, any guest side accelerated instructions that rely on the
-                * paddings can end up with Illegal instruction error. The most common
-                * trigger is via memcpy'ing valid range to the guest side mapped buffer
-                * memory, and then, e.g. __memcpy_avx_unaligned_erms  can hit the error.
-                */
-               alloc_info->allocationSize =
-                  align(alloc_info->allocationSize, getpagesize());
-            }
+         if (handle_type == VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT) {
+            /* Guest virtgpu kernel aligns up blob mem size to the page boundary. No
+             * matter dma-buf or opaque fd export allocation, the actual allocation
+             * in most cases would follow the same padding. For dma-buf, we are able
+             * to allocate and validate via lseek below. For opaque fd, Vulkan spec
+             * requires to use the same size with allocation time for the mapper,
+             * either vkr_allocator or vulkano, to import and populate the mapping.
+             * Accessible mapping given by vkMapMemory is normally limited to just the
+             * alloc size. When KVM register the mappings to guest pci bar, that
+             * involves an invalid chunk towards the end of the page boundary. As a
+             * result, any guest side accelerated instructions that rely on the
+             * paddings can end up with Illegal instruction error. The most common
+             * trigger is via memcpy'ing valid range to the guest side mapped buffer
+             * memory, and then, e.g. __memcpy_avx_unaligned_erms  can hit the error.
+             */
+            alloc_info->allocationSize = align(alloc_info->allocationSize, getpagesize());
          }
       } else if (physical_dev->EXT_external_memory_dma_buf) {
          /* Allocate dma_buf externally and force to import. */
