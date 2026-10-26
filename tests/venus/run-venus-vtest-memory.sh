@@ -158,8 +158,13 @@ fi
 } >"$prefix.summary.log"
 cat "$prefix.summary.log"
 
-if [ "$VN_ALLOC_MODE" = sync ] || [ "$case_name" = happy ]; then
+if [ "$case_name" = happy ]; then
    if [ "$client_status" -ne 0 ] || [ "$server_status" -ne 0 ]; then
+      exit 1
+   fi
+elif [ "$VN_ALLOC_MODE" = sync ]; then
+   if [ "$client_status" -ne 0 ] || [ "$server_status" -ne 0 ] ||
+      [ "$rejection_matches" -lt 1 ]; then
       exit 1
    fi
 elif { [ "$client_status" -ne 134 ] && [ "$device_lost_matches" -lt 1 ]; } ||
