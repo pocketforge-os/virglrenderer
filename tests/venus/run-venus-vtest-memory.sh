@@ -5,7 +5,8 @@ set -eu
 
 case_name=${1:-happy}
 case "$case_name" in
-   happy|foreign|wrong-size|wrong-offset|wrong-memory-type) ;;
+   happy|happy-unaligned|implicit-unaligned|foreign|wrong-size|\
+      wrong-size-unaligned|wrong-offset|wrong-memory-type) ;;
    *) echo "unknown test case: $case_name" >&2; exit 2 ;;
 esac
 
@@ -120,11 +121,17 @@ device_lost_matches=$(grep -c "async use returned VK_ERROR_DEVICE_LOST" \
    "$prefix.client.log" || true)
 successful_wait_matches=$(grep -c "async-use reached a successful wait" \
    "$prefix.client.log" || true)
+missing_export_matches=$(grep -c \
+   "opaque resource was not exported by this renderer" \
+   "$prefix.server.log" || true)
+size_mismatch_matches=$(grep -c \
+   "opaque resource allocation size does not match export" \
+   "$prefix.server.log" || true)
 case "$case_name" in
    foreign)
       rejection_pattern="failed to import resource: invalid res_id"
       ;;
-   wrong-size)
+   wrong-size|wrong-size-unaligned)
       rejection_pattern="opaque resource allocation size does not match export"
       ;;
    wrong-offset)
@@ -154,11 +161,14 @@ fi
    echo "use_cs_error_matches=$use_cs_error_matches"
    echo "device_lost_matches=$device_lost_matches"
    echo "successful_wait_matches=$successful_wait_matches"
+   echo "missing_export_matches=$missing_export_matches"
+   echo "size_mismatch_matches=$size_mismatch_matches"
    echo "rejection_matches=$rejection_matches"
 } >"$prefix.summary.log"
 cat "$prefix.summary.log"
 
-if [ "$case_name" = happy ]; then
+if [ "$case_name" = happy ] || [ "$case_name" = happy-unaligned ] ||
+   [ "$case_name" = implicit-unaligned ]; then
    if [ "$client_status" -ne 0 ] || [ "$server_status" -ne 0 ]; then
       exit 1
    fi

@@ -7,6 +7,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <inttypes.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -148,6 +149,20 @@ allocate_exportable(struct vk_context *ctx,
    const VkMemoryAllocateInfo alloc_info = {
       .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
       .pNext = &export_info,
+      .allocationSize = size,
+      .memoryTypeIndex = memory_type,
+   };
+   return vkAllocateMemory(ctx->device, &alloc_info, NULL, memory);
+}
+
+static VkResult
+allocate_implicit(struct vk_context *ctx,
+                  VkDeviceSize size,
+                  uint32_t memory_type,
+                  VkDeviceMemory *memory)
+{
+   const VkMemoryAllocateInfo alloc_info = {
+      .sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
       .allocationSize = size,
       .memoryTypeIndex = memory_type,
    };
@@ -372,7 +387,12 @@ run_case(const char *name)
 {
    const char *alloc_mode = getenv("VN_ALLOC_MODE");
    const bool async_alloc = alloc_mode && !strcmp(alloc_mode, "async");
-   const VkDeviceSize size = 4096;
+   const bool implicit = !strcmp(name, "implicit-unaligned");
+   const bool unaligned = implicit || !strcmp(name, "happy-unaligned") ||
+                          !strcmp(name, "wrong-size-unaligned");
+   const bool success_case = !strcmp(name, "happy") ||
+                             !strcmp(name, "happy-unaligned") || implicit;
+   const VkDeviceSize size = unaligned ? 4096 + 256 : 4096;
    struct vk_context owner = { 0 };
    VkResult result = create_context(&owner);
    if (result != VK_SUCCESS) {
@@ -382,13 +402,29 @@ run_case(const char *name)
 
    const uint32_t memory_type = choose_memory_type(&owner);
    VkDeviceMemory memory = VK_NULL_HANDLE;
-   result = allocate_exportable(&owner, size, memory_type, &memory);
+   result = implicit ? allocate_implicit(&owner, size, memory_type, &memory)
+                     : allocate_exportable(&owner, size, memory_type, &memory);
    if (result != VK_SUCCESS) {
-      fprintf(stderr, "FAIL exportable-allocation: %d\n", result);
+      fprintf(stderr, "FAIL %sallocation: %d\n",
+              implicit ? "implicit-" : "exportable-", result);
       destroy_context(&owner);
       return 1;
    }
-   printf("PASS exportable-allocation\n");
+   printf("PASS %sallocation: size=%" PRIu64 "\n",
+          implicit ? "implicit-" : "exportable-", (uint64_t)size);
+
+   if (implicit) {
+      void *mapping = NULL;
+      result = vkMapMemory(owner.device, memory, 0, size, 0, &mapping);
+      if (result != VK_SUCCESS) {
+         fprintf(stderr, "FAIL implicit-map: %d\n", result);
+         vkFreeMemory(owner.device, memory, NULL);
+         destroy_context(&owner);
+         return 1;
+      }
+      vkUnmapMemory(owner.device, memory);
+      printf("PASS implicit-map\n");
+   }
 
    int fd = -1;
    result = export_memory(&owner, memory, &fd);
@@ -401,7 +437,7 @@ run_case(const char *name)
    printf("PASS export-memory\n");
 
    int ret = 1;
-   if (!strcmp(name, "happy")) {
+   if (success_case) {
       VkMemoryFdPropertiesKHR props = {
          .sType = VK_STRUCTURE_TYPE_MEMORY_FD_PROPERTIES_KHR,
       };
@@ -429,10 +465,21 @@ run_case(const char *name)
       vkFreeMemory(owner.device, imported, NULL);
       printf("PASS self-reimport\n");
       ret = 0;
-   } else if (!strcmp(name, "wrong-size")) {
+   } else if (!strcmp(name, "wrong-size") ||
+              !strcmp(name, "wrong-size-unaligned")) {
+      const long page_size = sysconf(_SC_PAGESIZE);
+      if (page_size <= 0) {
+         fprintf(stderr, "FAIL get-page-size\n");
+         goto out;
+      }
+      const VkDeviceSize import_size =
+         !strcmp(name, "wrong-size-unaligned")
+            ? ((size + (VkDeviceSize)page_size - 1) /
+               (VkDeviceSize)page_size) * (VkDeviceSize)page_size
+            : size * 2;
       int import_fd = fcntl(fd, F_DUPFD_CLOEXEC, 0);
       VkDeviceMemory imported = VK_NULL_HANDLE;
-      result = import_memory(&owner, import_fd, size * 2,
+      result = import_memory(&owner, import_fd, import_size,
                              memory_type, &imported);
       ret = expect_invalid(name, result, async_alloc);
       if (result == VK_SUCCESS) {
@@ -509,7 +556,8 @@ main(int argc, char **argv)
 {
    if (argc != 2) {
       fprintf(stderr,
-              "usage: %s happy|foreign|wrong-size|wrong-offset|wrong-memory-type\n",
+              "usage: %s happy|happy-unaligned|implicit-unaligned|foreign|"
+              "wrong-size|wrong-size-unaligned|wrong-offset|wrong-memory-type\n",
               argv[0]);
       return 2;
    }
