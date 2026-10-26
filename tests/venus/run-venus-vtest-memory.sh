@@ -14,6 +14,12 @@ esac
 : "${HOST_ICD:?set HOST_ICD to lvp_icd.x86_64.json}"
 : "${HOST_LIBDIR:?set HOST_LIBDIR to the pinned host library directory}"
 : "${LOG_DIR:?set LOG_DIR to the output log directory}"
+: "${VN_ALLOC_MODE:?set VN_ALLOC_MODE to sync or async}"
+case "$VN_ALLOC_MODE" in
+   sync) vn_perf=no_async_mem_alloc ;;
+   async) vn_perf= ;;
+   *) echo "unknown allocation mode: $VN_ALLOC_MODE" >&2; exit 2 ;;
+esac
 
 script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 server=$HOST_BUILD/vtest/virgl_test_server
@@ -75,6 +81,7 @@ if [ "$ready" -ne 1 ]; then
    server_status=${server_status:-0}
    {
       echo "case=$case_name"
+      echo "allocation_mode=$VN_ALLOC_MODE"
       echo "setup=server-not-ready"
       echo "server_exit=$server_status"
    } >"$prefix.summary.log"
@@ -84,6 +91,7 @@ fi
 
 set +e
 timeout 20s env VK_DRIVER_FILES="$GUEST_ICD" VN_DEBUG=vtest \
+   VN_ALLOC_MODE="$VN_ALLOC_MODE" VN_PERF="$vn_perf" \
    VTEST_SOCKET_NAME="$socket" "$client" "$case_name" \
    >"$prefix.client.log" 2>&1
 client_status=$?
@@ -104,16 +112,48 @@ stub_matches=$(grep -c "minigbm_allocation is not enabled" \
    "$prefix.server.log" || true)
 dispatch_matches=$(grep -c "VTEST_CLIENT_ERROR_COMMAND_DISPATCH" \
    "$prefix.server.log" || true)
+cs_error_matches=$(grep -c "vkFreeMemory resulted in CS error" \
+   "$prefix.server.log" || true)
+case "$case_name" in
+   foreign)
+      rejection_pattern="failed to import resource: invalid res_id"
+      ;;
+   wrong-size)
+      rejection_pattern="opaque resource allocation size does not match export"
+      ;;
+   wrong-offset)
+      rejection_pattern="opaque resource fd offset changed after export"
+      ;;
+   wrong-memory-type)
+      rejection_pattern="opaque resource memory type does not match export"
+      ;;
+   *)
+      rejection_pattern=
+      ;;
+esac
+if [ -n "$rejection_pattern" ]; then
+   rejection_matches=$(grep -c "$rejection_pattern" "$prefix.server.log" || true)
+else
+   rejection_matches=0
+fi
 {
    echo "case=$case_name"
+   echo "allocation_mode=$VN_ALLOC_MODE"
    echo "client_exit=$client_status"
    echo "server_exit=$server_status"
    echo "server_wait_exit=$server_wait_status"
    echo "gbm_stub_matches=$stub_matches"
    echo "dispatch_error_matches=$dispatch_matches"
+   echo "cs_error_matches=$cs_error_matches"
+   echo "rejection_matches=$rejection_matches"
 } >"$prefix.summary.log"
 cat "$prefix.summary.log"
 
-if [ "$client_status" -ne 0 ] || [ "$server_status" -ne 0 ]; then
+if [ "$VN_ALLOC_MODE" = sync ] || [ "$case_name" = happy ]; then
+   if [ "$client_status" -ne 0 ] || [ "$server_status" -ne 0 ]; then
+      exit 1
+   fi
+elif [ "$client_status" -ne 134 ] || [ "$server_status" -ne 0 ] ||
+     [ "$rejection_matches" -lt 1 ] || [ "$cs_error_matches" -lt 1 ]; then
    exit 1
 fi

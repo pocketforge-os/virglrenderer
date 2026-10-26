@@ -165,8 +165,19 @@ import_memory(struct vk_context *ctx,
 }
 
 static int
-expect_invalid(const char *name, VkResult result)
+expect_invalid(const char *name, VkResult result, bool async_alloc)
 {
+   if (async_alloc) {
+      if (result != VK_SUCCESS) {
+         fprintf(stderr, "FAIL %s async submission: expected %d, got %d\n",
+                 name, VK_SUCCESS, result);
+         return 1;
+      }
+      printf("PASS %s: async allocation queued for host validation\n", name);
+      fflush(stdout);
+      return 0;
+   }
+
    if (result != VK_ERROR_INVALID_EXTERNAL_HANDLE) {
       fprintf(stderr, "FAIL %s: expected %d, got %d\n", name,
               VK_ERROR_INVALID_EXTERNAL_HANDLE, result);
@@ -179,6 +190,8 @@ expect_invalid(const char *name, VkResult result)
 static int
 run_case(const char *name)
 {
+   const char *alloc_mode = getenv("VN_ALLOC_MODE");
+   const bool async_alloc = alloc_mode && !strcmp(alloc_mode, "async");
    const VkDeviceSize size = 4096;
    struct vk_context owner = { 0 };
    VkResult result = create_context(&owner);
@@ -241,7 +254,7 @@ run_case(const char *name)
       VkDeviceMemory imported = VK_NULL_HANDLE;
       result = import_memory(&owner, import_fd, size * 2,
                              memory_type, &imported);
-      ret = expect_invalid(name, result);
+      ret = expect_invalid(name, result, async_alloc);
       if (result == VK_SUCCESS)
          vkFreeMemory(owner.device, imported, NULL);
       else if (import_fd >= 0)
@@ -256,7 +269,7 @@ run_case(const char *name)
       }
       VkDeviceMemory imported = VK_NULL_HANDLE;
       result = import_memory(&owner, import_fd, size, memory_type, &imported);
-      ret = expect_invalid(name, result);
+      ret = expect_invalid(name, result, async_alloc);
       if (result == VK_SUCCESS)
          vkFreeMemory(owner.device, imported, NULL);
       else
@@ -266,7 +279,7 @@ run_case(const char *name)
       VkDeviceMemory imported = VK_NULL_HANDLE;
       result = import_memory(&owner, import_fd, size,
                              memory_type + 1, &imported);
-      ret = expect_invalid(name, result);
+      ret = expect_invalid(name, result, async_alloc);
       if (result == VK_SUCCESS)
          vkFreeMemory(owner.device, imported, NULL);
       else if (import_fd >= 0)
@@ -282,7 +295,7 @@ run_case(const char *name)
       VkDeviceMemory imported = VK_NULL_HANDLE;
       result = import_memory(&foreign, import_fd, size,
                              choose_memory_type(&foreign), &imported);
-      ret = expect_invalid(name, result);
+      ret = expect_invalid(name, result, async_alloc);
       if (result == VK_SUCCESS)
          vkFreeMemory(foreign.device, imported, NULL);
       else if (import_fd >= 0)
